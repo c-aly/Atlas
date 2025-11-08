@@ -2,11 +2,6 @@ import torch
 import numpy as np
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
-from pathlib import Path
-import db
-from pca3d import fit_pca3d_on_images
-
-
 
 # --- Load model & processor once globally (faster for repeated calls) ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -47,32 +42,3 @@ def image_to_clip_vector(img: Image.Image) -> np.ndarray:
 
     emb = feats.squeeze(0).cpu().numpy().astype(np.float32)
     return emb
-
-
-
-# get 
-def main():
-    folder = Path("test_images")
-    valid = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-
-    imgs, paths = [], []
-    for p in folder.iterdir():
-        if p.suffix.lower() in valid:
-            paths.append(p)
-            imgs.append(Image.open(p))
-
-    coords3d, pca, scale = fit_pca3d_on_images(imgs, image_to_clip_vector)
-    print(coords3d)
-    # use transform
-
-    user_id = "00000000-0000-0000-0000-000000000000"
-    for (p, c) in zip(paths, coords3d):
-        # If you also store the 512-D embedding, compute it once here:
-        emb = image_to_clip_vector(Image.open(p))
-        db.upload_image(str(p), emb, c.tolist(), user_id)
-
-
-
-# run
-if __name__=="__main__":
-    main()
