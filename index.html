@@ -1,0 +1,178 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Atlas Viewer (Debug)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin:0; height:100%; background:#0b1020; color:#e5e7eb }
+    #app { width:100%; height:100%; }
+    .hud {
+      position:fixed; top:10px; left:10px; padding:8px 10px;
+      background:#0008; border-radius:8px; font:13px system-ui; max-width:70ch
+    }
+    .err { color:#ffb4b4 }
+    code { background:#1116; padding:2px 4px; border-radius:4px }
+  </style>
+</head>
+<body>
+  <!-- 🔧 UPDATE THESE THREE VALUES -->
+  <script>
+    window.env = {
+      DB_URL: "https://avygoysscyyiiblqofqa.supabase.co",
+      DB_PUBLIC_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF2eWdveXNzY3l5aWlibHFvZnFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI1Njc0ODQsImV4cCI6MjA3ODE0MzQ4NH0.WYzkL-fx6BpNE36ZpIsI_75OZEX7HvT4vIMctlW5GNE",
+      USER_ID: "00000000-0000-0000-0000-000000000000"
+    };
+  </script>
+
+  <div id="app"></div>
+  <div class="hud" id="hud">Booting…</div>
+
+  <script type="module">
+    const hud = document.getElementById('hud');
+    const setHud = (html) => { hud.innerHTML = html; };
+    const addHud = (html) => { hud.innerHTML += (hud.innerHTML ? '<br/>' : '') + html; };
+
+    // --- basic sanity checks ---
+    if (!window.env?.DB_URL || !window.env?.DB_PUBLIC_KEY) {
+      setHud('<span class="err">Missing DB_URL or DB_PUBLIC_KEY in window.env (top of file).</span>');
+      throw new Error('Env not set');
+    }
+
+    // --- load modules with fallback ---
+    async function loadSupabase() {
+      try {
+        const m = await import('https://esm.sh/@supabase/supabase-js@2');
+        return m;
+      } catch (e1) {
+        addHud('esm.sh failed; trying jsdelivr fallback…');
+        try {
+          const m = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+          return m;
+        } catch (e2) {
+          setHud(`<span class="err">Failed to load supabase-js.</span><br/>${e1}<br/>${e2}`);
+          throw e2;
+        }
+      }
+    }
+    async function loadThree() {
+      const [THREE, OrbitControls] = await Promise.all([
+        import('https://unpkg.com/three@0.160.0/build/three.module.js'),
+        import('https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js')
+      ]);
+      return { THREE, OrbitControls: OrbitControls.OrbitControls };
+    }
+
+    // --- start ---
+    setHud(`DB_URL: <code>${window.env.DB_URL}</code><br/>USER_ID: <code>${window.env.USER_ID}</code><br/>Loading libs…`);
+    const [{ createClient }, { THREE, OrbitControls }] = await Promise.all([loadSupabase(), loadThree()]);
+    addHud('Libraries loaded. Initializing Supabase…');
+
+    // Supabase client (anon key ONLY in browser)
+    const supabase = createClient(window.env.DB_URL, window.env.DB_PUBLIC_KEY);
+
+    // Query helper (dev: no user filter to prove data path; re-enable later)
+    async function fetchPointsDev() {
+      const { data, error } = await supabase
+        .from('images')
+        .select('id,image_url,position_vec,user_id')
+        // .eq('user_id', window.env.USER_ID)  // re-enable once Auth/RLS is set up
+        .not('position_vec', 'is', null)
+        .limit(5000);
+      if (error) throw error;
+      return data;
+    }
+
+    // --- Three.js scene setup ---
+    function initScene() {
+      const mount = document.getElementById('app');
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(mount.clientWidth, mount.clientHeight);
+      mount.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b1020);
+
+      const camera = new THREE.PerspectiveCamera(55, mount.clientWidth / mount.clientHeight, 0.01, 100);
+      camera.position.set(2.2, 1.6, 2.8);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true; controls.dampingFactor = 0.06;
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+      const dir = new THREE.DirectionalLight(0xffffff, 0.8); dir.position.set(2,3,4); scene.add(dir);
+
+      // Helper cube [-1,1]^3 and axes
+      const boxHelper = new THREE.Box3Helper(new THREE.Box3(new THREE.Vector3(-1,-1,-1), new THREE.Vector3(1,1,1)), 0x88aaff);
+      scene.add(boxHelper);
+      scene.add(new THREE.AxesHelper(1.5));
+
+      // Always-visible origin marker so you know rendering works
+      const origin = new THREE.Mesh(new THREE.SphereGeometry(0.05, 24, 24), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+      scene.add(origin);
+
+      // Resize handling + loop
+      window.addEventListener('resize', () => {
+        camera.aspect = mount.clientWidth / mount.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(mount.clientWidth, mount.clientHeight);
+      });
+      (function tick(){ controls.update(); renderer.render(scene, camera); requestAnimationFrame(tick); })();
+
+      return { scene, camera, renderer };
+    }
+
+    const { scene } = initScene();
+    addHud('Scene ready. Querying Supabase…');
+
+    // --- Fetch + draw ---
+    try {
+      const rows = await fetchPointsDev();
+      addHud(`Query OK. Rows: <b>${rows.length}</b>`);
+      console.log('Fetched rows:', rows);
+
+      if (rows.length === 0) {
+        addHud('<span class="err">No rows with position_vec. Either seed a row or loosen RLS temporarily.</span>');
+        // Drop a second test point so you see two objects
+        const test = new (await import('https://unpkg.com/three@0.160.0/build/three.module.js')).default.Mesh(
+          new (await import('https://unpkg.com/three@0.160.0/build/three.module.js')).default.SphereGeometry(0.05, 24, 24),
+          new (await import('https://unpkg.com/three@0.160.0/build/three.module.js')).default.MeshBasicMaterial({ color: 0xff6699 })
+        );
+        test.position.set(0.6, -0.3, 0.5);
+        scene.add(test);
+      } else {
+        // Build point cloud
+        const N = rows.length;
+        const positions = new Float32Array(N * 3);
+        const colors = new Float32Array(N * 3);
+
+        for (let i = 0; i < N; i++) {
+          const r = rows[i];
+          // position_vec may be numbers or strings; coerce to numbers
+          let [x, y, z] = r.position_vec || [0,0,0];
+          x = Number(x); y = Number(y); z = Number(z);
+          const j = i * 3, s = 0.98;
+          positions[j]   = x * s;
+          positions[j+1] = y * s;
+          positions[j+2] = z * s;
+          colors[j]   = (x + 1) * 0.5;
+          colors[j+1] = (y + 1) * 0.5;
+          colors[j+2] = (z + 1) * 0.5;
+        }
+
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        const mat = new THREE.PointsMaterial({ size: 0.035, vertexColors: true, transparent: true, opacity: 0.95 });
+        const cloud = new THREE.Points(geom, mat);
+        scene.add(cloud);
+        addHud('Rendered point cloud.');
+      }
+    } catch (e) {
+      console.error(e);
+      setHud(`<span class="err">Supabase query error:</span><br/>${e.message || e}`);
+    }
+  </script>
+</body>
+</html>
