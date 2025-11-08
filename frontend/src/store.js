@@ -18,6 +18,10 @@ export const useStore = create((set, get) => ({
   isLoading: false,
   loadingMessage: '',
   
+  // First-person navigation state
+  isFirstPerson: false,
+  firstPersonNode: null,
+  
   // Webcam state
   isWebcamActive: false,
   webcamPosition: null,
@@ -48,6 +52,24 @@ export const useStore = create((set, get) => ({
   setWebcamPosition: (position) => set({ webcamPosition: position }),
   
   setClusters: (clusters) => set({ clusters }),
+  
+  // First-person navigation
+  enterFirstPerson: (nodeId) => set({ 
+    isFirstPerson: true, 
+    firstPersonNode: nodeId,
+    selectedNode: nodeId 
+  }),
+  
+  exitFirstPerson: () => set({ 
+    isFirstPerson: false, 
+    firstPersonNode: null 
+  }),
+  
+  navigateToNode: (nodeId) => {
+    if (get().isFirstPerson) {
+      set({ firstPersonNode: nodeId, selectedNode: nodeId })
+    }
+  },
   
   getImageById: (id) => {
     return get().imageMap.get(id)

@@ -6,12 +6,15 @@ import StatsPanel from './components/StatsPanel'
 import NodeDetailPanel from './components/NodeDetailPanel'
 import WebcamMode from './components/WebcamMode'
 import LoadingOverlay from './components/LoadingOverlay'
+import FirstPersonControls from './components/FirstPersonControls'
+import LandingPage from './components/LandingPage'
 import { useStore } from './store'
 import { exportData, healthCheck } from './api'
 
 function App() {
   const [isInitialized, setIsInitialized] = useState(false)
-  const { setImages, setEdges, isLoading, loadingMessage } = useStore()
+  const [showLanding, setShowLanding] = useState(true)
+  const { setImages, setEdges, isLoading, loadingMessage, images } = useStore()
 
   useEffect(() => {
     // Initialize app
@@ -35,6 +38,9 @@ function App() {
               labels: data.meta?.[point.id]?.labels || []
             }))
             setImages(images)
+            
+            // Skip landing page if we have data
+            setShowLanding(false)
           }
           
           // Load graph edges
@@ -55,17 +61,22 @@ function App() {
 
   if (!isInitialized) {
     return (
-      <div className="flex items-center justify-center h-screen bg-neural-bg">
+      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-blue-950 via-blue-900 to-slate-900">
         <div className="text-center">
-          <div className="animate-pulse-glow text-4xl mb-4">🧭</div>
-          <p className="text-gray-400">Initializing Atlas...</p>
+          <div className="animate-pulse-glow text-6xl mb-4">🧭</div>
+          <p className="text-gray-300 text-lg">Initializing Atlas...</p>
         </div>
       </div>
     )
   }
+  
+  // Show landing page if no images
+  if (showLanding) {
+    return <LandingPage onComplete={() => setShowLanding(false)} />
+  }
 
   return (
-    <div className="relative w-screen h-screen bg-neural-bg overflow-hidden">
+    <div className="relative w-screen h-screen bg-neural-bg overflow-hidden fixed inset-0">
       {/* 3D Scene */}
       <Scene3D />
       
@@ -80,7 +91,20 @@ function App() {
             </div>
           </div>
           
-          <StatsPanel />
+          <div className="flex items-center space-x-4">
+            <button
+              onClick={() => setShowLanding(true)}
+              className="
+                px-4 py-2 bg-gray-700 hover:bg-gray-600
+                text-white text-sm font-medium rounded-lg
+                transition-colors duration-200
+              "
+              title="Return to landing page"
+            >
+              ← Upload More
+            </button>
+            <StatsPanel />
+          </div>
         </div>
       </header>
       
@@ -94,6 +118,9 @@ function App() {
       {/* Right Sidebar - Node Details */}
       <NodeDetailPanel />
       
+      {/* First-Person Navigation Controls */}
+      <FirstPersonControls />
+      
       {/* Loading Overlay */}
       {isLoading && <LoadingOverlay message={loadingMessage} />}
       
@@ -101,6 +128,7 @@ function App() {
       <div className="absolute bottom-6 left-6 z-10 text-sm text-gray-500 space-y-1">
         <p>🖱️ <span className="text-gray-400">Drag to rotate • Scroll to zoom</span></p>
         <p>🎯 <span className="text-gray-400">Click nodes to explore • Hover for preview</span></p>
+        <p>👁️ <span className="text-gray-400">Enter first-person mode to navigate inside</span></p>
       </div>
     </div>
   )
