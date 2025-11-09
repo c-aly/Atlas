@@ -26,7 +26,12 @@ app = FastAPI(title="Atlas")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your frontend URL
+    allow_origins=[
+        "https://goatlas.tech",
+        "http://localhost:5173",  # Local development
+        "http://localhost:3000",  # Alternative local port
+        "*"  # Allow all for now (can restrict in production)
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
