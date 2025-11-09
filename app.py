@@ -117,8 +117,17 @@ def home():
 
 
 @app.get("/health")
-async def health_check(user_id: str = Depends(get_user_id)):
-    """Health check endpoint"""
+async def health_check():
+    """Public health check endpoint (no auth required)"""
+    return {
+        "status": "ok",
+        "message": "Backend is running"
+    }
+
+
+@app.get("/health/user")
+async def health_check_user(user_id: str = Depends(get_user_id)):
+    """User-specific health check endpoint (requires auth)"""
     try:
         total_images = db.get_image_count(user_id)
     except Exception:

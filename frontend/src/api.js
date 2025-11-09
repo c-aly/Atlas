@@ -69,9 +69,9 @@ export const getStats = async () => {
   return response.data
 }
 
-// Health check
+// Health check (user-specific, requires auth)
 export const healthCheck = async () => {
-  const response = await api.get('/health')
+  const response = await api.get('/health/user')
   return response.data
 }
 
