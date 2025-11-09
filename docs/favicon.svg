@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <circle cx="50" cy="50" r="45" fill="#1a0d2e" stroke="#8b5cf6" stroke-width="3"/>
+  <circle cx="50" cy="50" r="35" fill="none" stroke="#3b82f6" stroke-width="2" opacity="0.5"/>
+  <!-- Compass needle pointing North -->
+  <line x1="50" y1="20" x2="50" y2="50" stroke="#ef4444" stroke-width="4" stroke-linecap="round"/>
+  <line x1="50" y1="50" x2="50" y2="80" stroke="#3b82f6" stroke-width="4" stroke-linecap="round"/>
+  <!-- Center dot -->
+  <circle cx="50" cy="50" r="4" fill="#8b5cf6"/>
+  <!-- N marker -->
+  <text x="50" y="15" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#8b5cf6" text-anchor="middle">N</text>
+  <!-- Compass rose lines -->
+  <line x1="50" y1="15" x2="50" y2="25" stroke="#8b5cf6" stroke-width="2"/>
+  <line x1="50" y1="75" x2="50" y2="85" stroke="#8b5cf6" stroke-width="2"/>
+  <line x1="15" y1="50" x2="25" y2="50" stroke="#8b5cf6" stroke-width="2"/>
+  <line x1="75" y1="50" x2="85" y2="50" stroke="#8b5cf6" stroke-width="2"/>
+</svg>
+
