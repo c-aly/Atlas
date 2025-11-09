@@ -10,6 +10,7 @@ import pickle
 import numpy as np
 from PIL import Image
 from typing import List, Optional
+from io import BytesIO
 import jwt
 import requests
 
@@ -33,8 +34,6 @@ app.add_middleware(
 
 # Setup directories
 ROOT = Path(__file__).resolve().parent
-UPLOADS_DIR = ROOT / "uploads"
-UPLOADS_DIR.mkdir(exist_ok=True)
 MODELS_DIR = ROOT / "models"
 MODELS_DIR.mkdir(exist_ok=True)
 
@@ -45,6 +44,13 @@ PCA_SCALE_PATH = MODELS_DIR / "pca_scale.pkl"
 # Supabase configuration for JWT verification
 SUPABASE_URL = os.getenv("DB_URL", "")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
+
+# Google AI Studio (Gemini) configuration
+GOOGLE_AI_API_KEY = os.getenv("GOOGLE_AI_API_KEY", "")
+
+# ElevenLabs configuration
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Default: Rachel (neutral narrator voice)
 
 def get_user_id(authorization: Optional[str] = Header(None)) -> str:
     """Extract user ID from Supabase JWT token"""
@@ -131,7 +137,6 @@ async def embed_batch(files: List[UploadFile] = File(...), user_id: str = Depend
     # Initialize variables before try block to avoid unbound variable errors
     new_embeddings = []
     new_image_ids = []
-    saved_paths = []
     
     try:
         from sklearn.decomposition import PCA
@@ -146,27 +151,32 @@ async def embed_batch(files: List[UploadFile] = File(...), user_id: str = Depend
             # Generate unique ID
             image_id = str(uuid.uuid4())
             
-            # Save file
+            # Get file extension
             file_ext = Path(file.filename).suffix or ".jpg" # type: ignore
-            saved_path = UPLOADS_DIR / f"{image_id}{file_ext}"
             
+            # Read file content
             content = await file.read()
-            with open(saved_path, "wb") as f:
-                f.write(content)
             
-            saved_paths.append(saved_path)
+            # Upload to Supabase Storage and get public URL
+            try:
+                storage_url = db.upload_image_to_storage(
+                    image_id=image_id,
+                    file_content=content,
+                    file_ext=file_ext,
+                    user_id=user_id
+                )
+            except Exception as e:
+                print(f"Error uploading image {image_id} to storage: {e}")
+                continue
             
-            # Generate CLIP embedding
-            img = Image.open(saved_path)
+            # Generate CLIP embedding from image bytes
+            img = Image.open(BytesIO(content))
             clip_emb = image_to_clip_vector(img)
-            
-            # Store relative URL for serving
-            relative_url = f"/uploads/{saved_path.name}"
             
             # Store in database with placeholder position (will update after PCA)
             try:
                 db.upload_image(
-                    image_url=relative_url,
+                    image_url=storage_url,
                     clip_vec=clip_emb,
                     position_vec=[0.0, 0.0, 0.0],  # Placeholder
                     user_id=user_id
@@ -175,8 +185,6 @@ async def embed_batch(files: List[UploadFile] = File(...), user_id: str = Depend
                 new_image_ids.append(image_id)
             except Exception as e:
                 print(f"Error storing image {image_id}: {e}")
-                if saved_path.exists():
-                    saved_path.unlink()
                 continue
         
         if not new_image_ids:
@@ -604,10 +612,17 @@ async def export_data(user_id: str = Depends(get_user_id)):
                     
                     # Extract filename from URL
                     image_url = img_data.get("image_url", "")
-                    filename = Path(image_url).name if image_url else "Unknown"
+                    # For Supabase Storage URLs, extract filename from URL path
+                    if image_url:
+                        if "/" in image_url:
+                            filename = image_url.split("/")[-1].split("?")[0]  # Remove query params
+                        else:
+                            filename = image_url
+                    else:
+                        filename = "Unknown"
                     
-                    # Build full URL for frontend
-                    thumb_url = f"http://localhost:8001{image_url}" if image_url.startswith("/") else image_url
+                    # Use Supabase Storage URL directly (already a full URL)
+                    thumb_url = image_url if image_url else ""
                     
                     # Get cluster ID (default to 0 if not set)
                     cluster_id = img_data.get("cluster_id")
@@ -623,7 +638,8 @@ async def export_data(user_id: str = Depends(get_user_id)):
                         "filename": filename,
                         "thumb": thumb_url,
                         "labels": [],
-                        "cluster": cluster_id
+                        "cluster": cluster_id,
+                        "description": img_data.get("description")  # Include description if available
                     }
         
         # Build graph edges automatically
@@ -718,6 +734,381 @@ async def export_data(user_id: str = Depends(get_user_id)):
         raise HTTPException(status_code=500, detail=f"Error exporting data: {str(e)}")
 
 
+@app.post("/describe/image/{image_id}")
+async def describe_image(image_id: str, user_id: str = Depends(get_user_id)):
+    """
+    Generate a 2-3 sentence description of an image using Google Gemini.
+    Caches the description in the database.
+    """
+    try:
+        # Check if description already exists
+        image_data = db.get_image_by_id(image_id, user_id)
+        if not image_data:
+            raise HTTPException(status_code=404, detail="Image not found")
+        
+        # If description already exists, return it
+        existing_description = image_data.get("description")
+        if existing_description:
+            return {
+                "success": True,
+                "description": existing_description,
+                "cached": True
+            }
+        
+        # Get fresh signed URL for the image (don't use stored URL as it may be expired or public)
+        # Generate a fresh signed URL that works with private buckets
+        try:
+            signed_url = db.get_signed_url_for_image(image_id, user_id, expires_in=3600)
+            if not signed_url:
+                raise HTTPException(status_code=404, detail="Could not generate image URL")
+            image_url = signed_url
+            print(f"Generated fresh signed URL for description: {image_url[:100]}...")
+        except Exception as e:
+            print(f"Error generating signed URL for description: {e}")
+            # Fallback to stored URL if signed URL generation fails
+            image_url = image_data.get("image_url")
+            if not image_url:
+                raise HTTPException(status_code=404, detail="Image URL not found and could not generate signed URL")
+            print(f"Using stored URL as fallback: {image_url[:100]}...")
+        
+        # Check if Google AI is configured
+        if not GOOGLE_AI_API_KEY:
+            raise HTTPException(
+                status_code=500, 
+                detail="Google AI API not configured. Please set GOOGLE_AI_API_KEY in environment variables."
+            )
+        
+        # Fetch image from Supabase Storage URL
+        try:
+            # Fetch from Supabase Storage URL (now using fresh signed URL)
+            response = requests.get(image_url, timeout=10)
+            response.raise_for_status()
+            image_data_bytes = response.content
+            print(f"Successfully fetched image for description (size: {len(image_data_bytes)} bytes)")
+        except Exception as e:
+            print(f"Error loading image for description: {e}")
+            print(f"Failed URL: {image_url}")
+            raise HTTPException(status_code=500, detail=f"Failed to load image: {str(e)}")
+        
+        # Call Google Gemini API
+        try:
+            import google.generativeai as genai
+            
+            # Configure Gemini
+            genai.configure(api_key=GOOGLE_AI_API_KEY)
+            
+            # List available models first to see what's accessible
+            try:
+                available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                print(f"Available models: {available_models}")
+            except Exception as e:
+                print(f"Could not list models: {e}")
+            
+            # Try vision-capable models - use models that are actually available
+            # Based on the available models list, use these in order of preference
+            model_names = [
+                'gemini-2.0-flash',      # Latest flash model
+                'gemini-2.0-flash-001',  # Specific version
+                'gemini-2.5-flash',      # 2.5 flash version
+                'gemini-2.5-pro',        # 2.5 pro version
+                'gemini-flash-latest',   # Latest flash (alias)
+                'gemini-pro-latest'      # Latest pro (alias)
+            ]
+            
+            model = None
+            last_error = None
+            
+            for model_name in model_names:
+                try:
+                    # Check if model supports vision by checking its input modalities
+                    model_info = genai.get_model(model_name)
+                    print(f"Trying model: {model_name}")
+                    model = genai.GenerativeModel(model_name)
+                    # If we get here, model was created successfully
+                    break
+                except Exception as e:
+                    last_error = e
+                    print(f"Model {model_name} not available: {e}")
+                    continue
+            
+            if model is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"None of the Gemini models are available. Last error: {str(last_error)}. Please check your API key and model access. Make sure you're using a valid Google AI Studio API key with vision model access."
+                )
+            
+            # Prepare the image - convert to base64 for Gemini API
+            import base64
+            from PIL import Image
+            from io import BytesIO
+            
+            # Open and potentially resize image if too large
+            img = Image.open(BytesIO(image_data_bytes))
+            
+            # Convert image to base64
+            buffered = BytesIO()
+            # Save as JPEG to reduce size
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img.save(buffered, format="JPEG", quality=85)
+            img_base64 = base64.b64encode(buffered.getvalue()).decode()
+            
+            # Generate description with a narrative, story-telling prompt
+            prompt = """Please write a brief, engaging 2-3 sentence description of this image in a narrative, story-telling style. 
+Write it as if you are a narrator describing a scene or moment. Use phrases like "Here we have..." or "This image shows..." to begin.
+Be descriptive and highlight interesting visual elements, but maintain a serious, thoughtful tone. 
+Avoid casual phrases like "Check out this pic!" or overly enthusiastic language. 
+Write as if you are telling a story about what is happening in the image. Keep it concise and clear."""
+            
+            # Generate content with image and prompt
+            # Use the image data directly (PIL Image object works with Gemini)
+            try:
+                response = model.generate_content([prompt, img])
+                
+                # Extract the description
+                if hasattr(response, 'text') and response.text:
+                    description = response.text.strip()
+                elif hasattr(response, 'candidates') and response.candidates:
+                    # Sometimes response structure is different
+                    description = response.candidates[0].content.parts[0].text.strip()
+                else:
+                    raise HTTPException(status_code=500, detail="Gemini API returned empty response")
+            except Exception as e:
+                error_msg = str(e)
+                if "not supported for generative content" in error_msg or "model not found" in error_msg.lower():
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Model does not support vision/image input. Error: {error_msg}. Please ensure you're using a vision-capable model like gemini-1.5-pro or gemini-1.5-flash."
+                    )
+                raise
+            
+            if description:
+                # Save description to database
+                db.update_image_description(image_id, description)
+                
+                return {
+                    "success": True,
+                    "description": description,
+                    "cached": False
+                }
+            else:
+                raise HTTPException(status_code=500, detail="Google Gemini did not return a description")
+            
+        except ImportError:
+            raise HTTPException(
+                status_code=500,
+                detail="Google Generative AI package not installed. Run: pip install google-generativeai"
+            )
+        except Exception as e:
+            print(f"Error calling Google Gemini API: {e}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Failed to generate description: {str(e)}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error describing image: {str(e)}")
+
+
+@app.get("/narrate/image/{image_id}")
+async def narrate_image(image_id: str, user_id: str = Depends(get_user_id)):
+    """
+    Generate audio narration of an image description using ElevenLabs.
+    Returns the audio as a streaming response.
+    """
+    try:
+        # Get image data and description
+        image_data = db.get_image_by_id(image_id, user_id)
+        if not image_data:
+            raise HTTPException(status_code=404, detail="Image not found")
+        
+        # Get description
+        description = image_data.get("description")
+        if not description:
+            raise HTTPException(status_code=404, detail="Image description not found. Please generate a description first.")
+        
+        # Check for cached audio URL first
+        cached_audio_url = db.get_image_audio_url(image_id, user_id)
+        if cached_audio_url:
+            print(f"Found cached audio URL for {image_id}, returning cached audio")
+            # Return the cached audio file from Supabase Storage
+            try:
+                # Fetch the cached audio
+                response = requests.get(cached_audio_url, timeout=10)
+                if response.status_code == 200:
+                    from fastapi.responses import StreamingResponse
+                    from io import BytesIO
+                    audio_stream = BytesIO(response.content)
+                    return StreamingResponse(
+                        audio_stream,
+                        media_type="audio/mpeg",
+                        headers={
+                            "Content-Disposition": f"inline; filename=narration_{image_id}.mp3",
+                            "Cache-Control": "public, max-age=86400"  # Cache for 24 hours
+                        }
+                    )
+                else:
+                    print(f"Cached audio URL returned {response.status_code}, generating fresh audio")
+                    # Fall through to generate fresh audio
+            except Exception as e:
+                print(f"Error fetching cached audio: {e}, generating fresh audio")
+                # Fall through to generate fresh audio
+        
+        # Check if ElevenLabs is configured
+        if not ELEVENLABS_API_KEY:
+            raise HTTPException(
+                status_code=500,
+                detail="ElevenLabs API not configured. Please set ELEVENLABS_API_KEY in environment variables."
+            )
+        
+        # Generate audio using ElevenLabs
+        try:
+            from elevenlabs import ElevenLabs
+            
+            # Initialize client with API key
+            client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+            
+            print(f"Generating audio for description (length: {len(description)} chars)")
+            print(f"Using voice ID: {ELEVENLABS_VOICE_ID}")
+            
+            # Generate audio from description using the new API
+            # The text_to_speech.convert method returns a generator of bytes
+            try:
+                audio_generator = client.text_to_speech.convert(
+                    voice_id=ELEVENLABS_VOICE_ID,
+                    text=description,
+                    model_id="eleven_monolingual_v1"  # Optional: specify model
+                )
+                
+                # Collect all audio bytes from the generator
+                audio_bytes = b"".join(audio_generator)
+                print(f"Successfully generated audio (size: {len(audio_bytes)} bytes)")
+                
+                # Cache audio file in Supabase Storage
+                try:
+                    # Use db module's upload function to store audio
+                    audio_storage_id = f"{image_id}_audio"
+                    cached_audio_url = db.upload_image_to_storage(
+                        image_id=audio_storage_id,
+                        file_content=audio_bytes,
+                        file_ext=".mp3",
+                        user_id=user_id
+                    )
+                    
+                    # Save audio URL to database for future use
+                    if cached_audio_url:
+                        db.update_image_audio_url(image_id, cached_audio_url)
+                        print(f"Cached audio file at: {cached_audio_url[:100]}...")
+                except Exception as cache_error:
+                    print(f"Warning: Could not cache audio file: {cache_error}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continue without caching - audio will still be returned
+            except Exception as api_error:
+                error_str = str(api_error)
+                print(f"Error with eleven_monolingual_v1: {error_str}")
+                
+                # Try without specifying model (uses default)
+                try:
+                    print("Trying without model parameter...")
+                    audio_generator = client.text_to_speech.convert(
+                        voice_id=ELEVENLABS_VOICE_ID,
+                        text=description
+                    )
+                    audio_bytes = b"".join(audio_generator)
+                    print(f"Successfully generated audio with default model (size: {len(audio_bytes)} bytes)")
+                except Exception as api_error2:
+                    error_str2 = str(api_error2)
+                    print(f"Error with default model: {error_str2}")
+                    # Re-raise with more context
+                    raise Exception(f"ElevenLabs API error. First attempt: {error_str}. Second attempt: {error_str2}")
+            
+            # Return audio as streaming response
+            from fastapi.responses import StreamingResponse
+            from io import BytesIO
+            
+            # Convert bytes to BytesIO for streaming
+            audio_stream = BytesIO(audio_bytes)
+            
+            return StreamingResponse(
+                audio_stream,
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Disposition": f"inline; filename=narration_{image_id}.mp3",
+                    "Cache-Control": "public, max-age=3600"  # Cache for 1 hour
+                }
+            )
+            
+        except ImportError:
+            raise HTTPException(
+                status_code=500,
+                detail="ElevenLabs package not installed. Run: pip install elevenlabs"
+            )
+        except Exception as e:
+            error_msg = str(e)
+            print(f"Error calling ElevenLabs API: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            
+            # Provide more helpful error messages
+            if "401" in error_msg or "Unauthorized" in error_msg or "Invalid API key" in error_msg:
+                raise HTTPException(
+                    status_code=500,
+                    detail="ElevenLabs API key is invalid or unauthorized. Please check your ELEVENLABS_API_KEY in .env file."
+                )
+            elif "404" in error_msg or "voice" in error_msg.lower():
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"ElevenLabs voice ID not found. Please check your ELEVENLABS_VOICE_ID. Error: {error_msg}"
+                )
+            elif "quota" in error_msg.lower() or "limit" in error_msg.lower():
+                raise HTTPException(
+                    status_code=500,
+                    detail="ElevenLabs API quota exceeded. Please check your account limits."
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to generate narration: {error_msg}"
+                )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error narrating image: {str(e)}")
+
+
+@app.get("/image/{image_id}/url")
+async def get_image_url(image_id: str, expires_in: int = 3600, user_id: str = Depends(get_user_id)):
+    """
+    Get a fresh signed URL for an image (useful when URLs expire).
+    Returns a new signed URL that expires after expires_in seconds (default 1 hour).
+    """
+    try:
+        print(f"Generating fresh signed URL for image {image_id}, user {user_id}, expires_in={expires_in}")
+        signed_url = db.get_signed_url_for_image(image_id, user_id, expires_in)
+        if not signed_url:
+            raise HTTPException(status_code=404, detail="Image not found or could not generate URL")
+        print(f"Successfully generated URL: {signed_url[:100]}...")
+        return {
+            "success": True,
+            "url": signed_url,
+            "expires_in": expires_in
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Error generating image URL: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generating image URL: {str(e)}")
+
+
 @app.get("/stats")
 async def get_stats(user_id: str = Depends(get_user_id)):
     """Get statistics about the dataset"""
@@ -740,9 +1131,7 @@ async def get_stats(user_id: str = Depends(get_user_id)):
         }
 
 
-# Serve uploaded images
-if UPLOADS_DIR.exists():
-    app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+# Images are now served from Supabase Storage, no local file serving needed
 
 # Optional: serve a /static route for additional files
 if (ROOT / "static").exists():

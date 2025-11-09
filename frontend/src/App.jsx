@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react'
 import Scene3D from './components/Scene3D'
 import UploadPanel from './components/UploadPanel'
-import SearchBar from './components/SearchBar'
 import StatsPanel from './components/StatsPanel'
 import NodeDetailPanel from './components/NodeDetailPanel'
 import LoadingOverlay from './components/LoadingOverlay'
 import LandingPage from './components/LandingPage'
+import AutoPlayButton from './components/AutoPlayButton'
 import { useStore } from './store'
 import { exportData, healthCheck, recomputeClusters } from './api'
 import { supabase } from './lib/supabase'
@@ -103,14 +103,15 @@ function App() {
           
           // Transform data for frontend
           if (data.coords && data.coords.points) {
-            const images = data.coords.points.map(point => ({
-              id: point.id,
-              coords: [point.x, point.y, point.z],
-              thumb: data.meta?.[point.id]?.thumb || null,
-              filename: data.meta?.[point.id]?.filename || 'Unknown',
-              labels: data.meta?.[point.id]?.labels || [],
-              cluster: data.meta?.[point.id]?.cluster || 0
-            }))
+                const images = data.coords.points.map(point => ({
+                  id: point.id,
+                  coords: [point.x, point.y, point.z],
+                  thumb: data.meta?.[point.id]?.thumb || null,
+                  filename: data.meta?.[point.id]?.filename || 'Unknown',
+                  labels: data.meta?.[point.id]?.labels || [],
+                  cluster: data.meta?.[point.id]?.cluster || 0,
+                  description: data.meta?.[point.id]?.description || null
+                }))
             setImages(images)
             
             // Skip landing page - go straight to map
@@ -183,7 +184,6 @@ function App() {
       {/* Left Sidebar - Upload & Controls */}
       <div className="absolute top-24 left-6 z-10 space-y-4 w-80 max-h-[calc(100vh-8rem)] overflow-y-auto pr-2">
         <UploadPanel />
-        <SearchBar />
       </div>
       
       {/* Right Sidebar - Node Details */}
@@ -197,6 +197,9 @@ function App() {
         <p>🖱️ <span className="text-gray-400">Drag to rotate • Scroll to zoom</span></p>
         <p>🎯 <span className="text-gray-400">Click nodes to explore • Hover for preview</span></p>
       </div>
+      
+      {/* Auto-Play Button (Bottom Center) */}
+      <AutoPlayButton />
     </div>
   )
 }

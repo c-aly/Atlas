@@ -18,6 +18,9 @@ export const useStore = create((set, get) => ({
   isLoading: false,
   loadingMessage: '',
   
+  // Auto-play state
+  isAutoPlaying: false,
+  
   // Auth state
   user: null,
   session: null,
@@ -44,6 +47,8 @@ export const useStore = create((set, get) => ({
   setUser: (user) => set({ user, isAuthenticated: !!user }),
   
   setSession: (session) => set({ session, isAuthenticated: !!session }),
+  
+  setIsAutoPlaying: (isAutoPlaying) => set({ isAutoPlaying }),
   
   getImageById: (id) => {
     return get().imageMap.get(id)

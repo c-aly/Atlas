@@ -2,7 +2,10 @@
  * Node Detail Panel Component
  * Shows details about selected node and its neighbors, or cluster legend when no node is selected
  */
+import { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store'
+import { describeImage, getNarrationUrl, getImageUrl } from '../api'
+import { supabase } from '../lib/supabase'
 
 // Cluster color palette (matching Scene3D.jsx)
 const CLUSTER_COLORS = [
@@ -30,6 +33,191 @@ const CLUSTER_COLORS = [
 
 export default function NodeDetailPanel() {
   const { selectedNode, getImageById, getNeighbors, setSelectedNode, images } = useStore()
+  const [description, setDescription] = useState(null)
+  const [isGeneratingDescription, setIsGeneratingDescription] = useState(false)
+  const [audioUrl, setAudioUrl] = useState(null)
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [narrationError, setNarrationError] = useState(null)
+  const [imageUrl, setImageUrl] = useState(null)
+  const [neighborUrls, setNeighborUrls] = useState({}) // Cache URLs for neighbor images
+  const audioRef = useRef(null)
+  
+  // Generate description and refresh image URL when node is selected
+  useEffect(() => {
+    if (selectedNode) {
+      const image = getImageById(selectedNode)
+      
+      // Set initial image URL from metadata
+      setImageUrl(image?.thumb || null)
+      
+      // Refresh image URL if it exists (in case it expired)
+      if (image?.thumb) {
+        // Try to get a fresh signed URL
+        getImageUrl(selectedNode, 86400) // 24 hour expiration
+          .then(result => {
+            if (result.success && result.url) {
+              setImageUrl(result.url)
+              console.log('Refreshed image URL for', selectedNode)
+            }
+          })
+          .catch(error => {
+            console.warn('Could not refresh image URL, using stored URL:', error)
+            // Keep using the stored URL
+          })
+      }
+      
+      // Check if image already has description in metadata
+      if (image?.description) {
+        setDescription(image.description)
+        setIsGeneratingDescription(false)
+        // Set up audio URL for narration
+        setAudioUrl(getNarrationUrl(selectedNode))
+      } else {
+        // Generate description
+        setIsGeneratingDescription(true)
+        setDescription(null)
+        setAudioUrl(null)
+        describeImage(selectedNode)
+          .then(result => {
+            if (result.success) {
+              setDescription(result.description)
+              // Set up audio URL for narration
+              setAudioUrl(getNarrationUrl(selectedNode))
+            }
+          })
+          .catch(error => {
+            console.error('Error generating description:', error)
+            setDescription(null)
+            setAudioUrl(null)
+          })
+          .finally(() => {
+            setIsGeneratingDescription(false)
+          })
+      }
+    } else {
+      setDescription(null)
+      setIsGeneratingDescription(false)
+      setAudioUrl(null)
+      setIsPlaying(false)
+      setNarrationError(null)
+      setImageUrl(null)
+    }
+    
+    // Cleanup audio when component unmounts or node changes
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current = null
+      }
+      setIsPlaying(false)
+    }
+  }, [selectedNode, getImageById])
+  
+  // Handle image load error - try to refresh URL
+  const handleImageError = async (e) => {
+    console.warn('Image failed to load, attempting to refresh URL for', selectedNode)
+    e.target.onerror = null // Prevent infinite loop
+    
+    if (selectedNode) {
+      try {
+        const result = await getImageUrl(selectedNode, 86400)
+        if (result.success && result.url) {
+          setImageUrl(result.url)
+          // Update the image src
+          e.target.src = result.url
+          console.log('Refreshed and updated image URL')
+        } else {
+          // Hide image and show placeholder
+          e.target.style.display = 'none'
+          if (e.target.nextSibling) {
+            e.target.nextSibling.style.display = 'flex'
+          }
+        }
+      } catch (error) {
+        console.error('Failed to refresh image URL:', error)
+        // Hide image and show placeholder
+        e.target.style.display = 'none'
+        if (e.target.nextSibling) {
+          e.target.nextSibling.style.display = 'flex'
+        }
+      }
+    }
+  }
+  
+  // Handle audio playback
+  const handlePlayNarration = async () => {
+    if (!audioUrl) return
+    
+    // Stop any currently playing audio
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+    
+    // Fetch audio with auth token
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      
+      const response = await fetch(audioUrl, {
+        headers: {
+          'Authorization': `Bearer ${session?.access_token || ''}`
+        }
+      })
+      
+      if (!response.ok) {
+        // Try to get error message from response
+        let errorMessage = `Failed to fetch audio (${response.status})`
+        try {
+          const errorData = await response.json()
+          errorMessage = errorData.detail || errorMessage
+        } catch {
+          // If response isn't JSON, use status text
+          errorMessage = response.statusText || errorMessage
+        }
+        throw new Error(errorMessage)
+      }
+      
+      const blob = await response.blob()
+      const audioObjectUrl = URL.createObjectURL(blob)
+      
+      const audio = new Audio(audioObjectUrl)
+      audioRef.current = audio
+      
+      audio.onplay = () => setIsPlaying(true)
+      audio.onended = () => {
+        setIsPlaying(false)
+        URL.revokeObjectURL(audioObjectUrl)
+        audioRef.current = null
+      }
+      audio.onerror = (e) => {
+        setIsPlaying(false)
+        console.error('Error playing narration audio:', e)
+        URL.revokeObjectURL(audioObjectUrl)
+        audioRef.current = null
+      }
+      
+      audio.play().catch(error => {
+        console.error('Error playing audio:', error)
+        setIsPlaying(false)
+        setNarrationError('Failed to play audio. Please try again.')
+        URL.revokeObjectURL(audioObjectUrl)
+        audioRef.current = null
+      })
+    } catch (error) {
+      console.error('Error loading narration audio:', error)
+      setIsPlaying(false)
+      setNarrationError(error.message || 'Failed to load narration. Please check your ElevenLabs API key.')
+    }
+  }
+  
+  const handleStopNarration = () => {
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current.currentTime = 0
+      audioRef.current = null
+      setIsPlaying(false)
+    }
+  }
   
   // Show legend when no node is selected
   if (!selectedNode) {
@@ -115,14 +303,10 @@ export default function NodeDetailPanel() {
           {/* Actual Image */}
           <div className="bg-neural-bg rounded-lg overflow-hidden">
             <img 
-              src={image.thumb || `http://localhost:8001/uploads/${selectedNode}`}
+              src={imageUrl || image.thumb || ''}
               alt={image.filename}
               className="w-full h-auto object-contain max-h-64"
-              onError={(e) => {
-                e.target.onerror = null;
-                e.target.style.display = 'none';
-                e.target.nextSibling.style.display = 'flex';
-              }}
+              onError={handleImageError}
             />
             <div className="hidden flex-col items-center justify-center p-8">
               <div className="text-5xl mb-2">🖼️</div>
@@ -163,6 +347,51 @@ export default function NodeDetailPanel() {
               </div>
             )}
           </div>
+          
+          {/* Image Description */}
+          <div className="mt-4 pt-4 border-t border-gray-700">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-sm font-semibold text-white">Description</h4>
+              {description && audioUrl && !narrationError && (
+                <div className="flex items-center space-x-2">
+                  {isPlaying ? (
+                    <button
+                      onClick={handleStopNarration}
+                      className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition-colors flex items-center space-x-1"
+                      title="Stop narration"
+                    >
+                      <span>⏹</span>
+                      <span>Stop</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handlePlayNarration}
+                      className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded transition-colors flex items-center space-x-1"
+                      title="Play narration"
+                    >
+                      <span>▶</span>
+                      <span>Listen</span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+            {narrationError && (
+              <div className="mt-2 p-2 bg-red-900/30 border border-red-700 rounded text-xs text-red-300">
+                {narrationError}
+              </div>
+            )}
+            {isGeneratingDescription ? (
+              <div className="flex items-center space-x-2 text-gray-400 text-sm">
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
+                <span>Generating description...</span>
+              </div>
+            ) : description ? (
+              <p className="text-sm text-gray-300 leading-relaxed">{description}</p>
+            ) : (
+              <p className="text-sm text-gray-500 italic">No description available</p>
+            )}
+          </div>
         </div>
         
         {/* Neighbors */}
@@ -175,44 +404,77 @@ export default function NodeDetailPanel() {
             </div>
             
             <div className="p-4 space-y-2 max-h-64 overflow-y-auto">
-              {neighbors.slice(0, 8).map((neighbor) => (
-                <div
-                  key={neighbor.id}
-                  onClick={() => setSelectedNode(neighbor.id)}
-                  className="
-                    flex items-center justify-between p-2 
-                    bg-neural-bg hover:bg-gray-700 rounded-lg 
-                    cursor-pointer transition-colors
-                  "
-                >
-                  <div className="flex items-center space-x-2">
-                    <div className="w-8 h-8 bg-neural-accent/20 rounded overflow-hidden flex-shrink-0">
-                      <img 
-                        src={neighbor.image.thumb || `http://localhost:8001/uploads/${neighbor.id}`}
-                        alt={neighbor.image.filename}
-                        className="w-full h-full object-cover"
-                        onError={(e) => {
-                          e.target.onerror = null;
-                          e.target.style.display = 'none';
-                          const fallback = document.createElement('div');
-                          fallback.className = 'w-8 h-8 flex items-center justify-center text-lg';
-                          fallback.textContent = '🖼️';
-                          e.target.parentNode.appendChild(fallback);
-                        }}
-                      />
+              {neighbors.slice(0, 8).map((neighbor) => {
+                // Get fresh URL for this neighbor if not already cached
+                const neighborUrl = neighborUrls[neighbor.id] || neighbor.image.thumb
+                
+                // Fetch fresh URL on mount if not cached
+                if (!neighborUrls[neighbor.id] && neighbor.image.thumb) {
+                  getImageUrl(neighbor.id, 86400)
+                    .then(result => {
+                      if (result.success && result.url) {
+                        setNeighborUrls(prev => ({ ...prev, [neighbor.id]: result.url }))
+                      }
+                    })
+                    .catch(error => {
+                      console.warn(`Could not refresh URL for neighbor ${neighbor.id}:`, error)
+                    })
+                }
+                
+                return (
+                  <div
+                    key={neighbor.id}
+                    onClick={() => setSelectedNode(neighbor.id)}
+                    className="
+                      flex items-center justify-between p-2 
+                      bg-neural-bg hover:bg-gray-700 rounded-lg 
+                      cursor-pointer transition-colors
+                    "
+                  >
+                    <div className="flex items-center space-x-2">
+                      <div className="w-8 h-8 bg-neural-accent/20 rounded overflow-hidden flex-shrink-0">
+                        <img 
+                          src={neighborUrl || ''}
+                          alt={neighbor.image.filename}
+                          className="w-full h-full object-cover"
+                          onError={async (e) => {
+                            e.target.onerror = null;
+                            // Try to refresh URL
+                            try {
+                              const result = await getImageUrl(neighbor.id, 86400)
+                              if (result.success && result.url) {
+                                setNeighborUrls(prev => ({ ...prev, [neighbor.id]: result.url }))
+                                e.target.src = result.url
+                              } else {
+                                e.target.style.display = 'none';
+                                const fallback = document.createElement('div');
+                                fallback.className = 'w-8 h-8 flex items-center justify-center text-lg';
+                                fallback.textContent = '🖼️';
+                                e.target.parentNode.appendChild(fallback);
+                              }
+                            } catch (error) {
+                              e.target.style.display = 'none';
+                              const fallback = document.createElement('div');
+                              fallback.className = 'w-8 h-8 flex items-center justify-center text-lg';
+                              fallback.textContent = '🖼️';
+                              e.target.parentNode.appendChild(fallback);
+                            }
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <p className="text-sm text-gray-300 truncate max-w-[150px]">
+                          {neighbor.image.filename}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {(neighbor.weight * 100).toFixed(0)}% similar
+                        </p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-sm text-gray-300 truncate max-w-[150px]">
-                        {neighbor.image.filename}
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        {(neighbor.weight * 100).toFixed(0)}% similar
-                      </p>
-                    </div>
+                    <div className="text-gray-400">→</div>
                   </div>
-                  <div className="text-gray-400">→</div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </>
         )}
