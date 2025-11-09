@@ -8,7 +8,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_ID = "openai/clip-vit-base-patch32"  # 512-D
 
 _model = CLIPModel.from_pretrained(MODEL_ID).to(device).eval()  # type: ignore
-_processor = CLIPProcessor.from_pretrained(MODEL_ID, use_fast=True)
+_processor = CLIPProcessor.from_pretrained(MODEL_ID, use_fast=False)
 
 def image_to_clip_vector(img: Image.Image) -> np.ndarray:
     """
