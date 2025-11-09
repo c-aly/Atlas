@@ -1152,9 +1152,13 @@ if __name__ == "__main__":
     # You can manually restart the server when code changes
     use_reload = sys.platform != "win32"
     
+    # Get PORT from environment, handle empty string case
+    port_str = os.getenv("PORT", "8001")
+    port = int(port_str) if port_str and port_str.strip() else 8001
+    
     uvicorn.run(
         app,  # Pass app directly instead of string to avoid import issues
         host="0.0.0.0",
-        port=int(os.getenv("PORT", "8001")),  # Use port 8001 by default, or PORT env var
+        port=port,
         reload=use_reload
     )
