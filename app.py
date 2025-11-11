@@ -30,11 +30,11 @@ app.add_middleware(
         "https://goatlas.tech",
         "http://localhost:5173",  # Local development
         "http://localhost:3000",  # Alternative local port
-        "*"  # Allow all for now (can restrict in production)
     ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Setup directories
