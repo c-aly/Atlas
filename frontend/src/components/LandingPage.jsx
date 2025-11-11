@@ -78,7 +78,9 @@ export default function LandingPage({ onComplete }) {
       
     } catch (error) {
       console.error('Processing error:', error)
-      alert('Error processing images: ' + (error.response?.data?.detail || error.message))
+      console.error('Full error:', error.response?.data)
+      const errorMessage = error.response?.data?.detail || error.message || 'Unknown error'
+      alert('Error processing images: ' + errorMessage)
       setIsProcessing(false)
     }
   }

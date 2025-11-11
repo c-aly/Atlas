@@ -365,8 +365,21 @@ def get_all_images_for_export(user_id: str) -> List[Dict]:
     if not supabase:
         raise ValueError("Database not configured")
     
-    result = supabase.table("images").select("id,image_url,position_vec,cluster_id,description").eq("user_id", user_id).execute()
-    return result.data if result.data else [] # type: ignore
+    try:
+        result = supabase.table("images").select("id,image_url,position_vec,cluster_id,description").eq("user_id", user_id).execute()
+        images = result.data if result.data else []
+        print(f"get_all_images_for_export: Found {len(images)} images for user_id: {user_id}")
+        if len(images) == 0:
+            # Debug: Check if there are any images at all (without user filter)
+            all_images = supabase.table("images").select("id,user_id").limit(5).execute()
+            if all_images.data:
+                print(f"Debug: Found {len(all_images.data)} total images in database (sample)")
+                sample_user_ids = [img.get("user_id") for img in all_images.data[:5]]
+                print(f"Sample user_ids in database: {sample_user_ids}")
+        return images  # type: ignore
+    except Exception as e:
+        print(f"Error in get_all_images_for_export for user {user_id}: {e}")
+        raise
 
 
 def get_image_count(user_id: str) -> int:
@@ -375,10 +388,27 @@ def get_image_count(user_id: str) -> int:
         return 0
     
     try:
-        result = supabase.table("images").select("id", count="exact").eq("user_id", user_id).limit(1).execute()  # type: ignore
-        return result.count if hasattr(result, 'count') else 0 # type: ignore
-    except:
-        return 0
+        # Use count query without limit to get accurate count
+        result = supabase.table("images").select("id", count="exact").eq("user_id", user_id).execute()  # type: ignore
+        # Supabase returns count in the count attribute
+        if hasattr(result, 'count') and result.count is not None:
+            return int(result.count)
+        # Fallback: count the actual data returned
+        elif result.data:
+            return len(result.data)
+        else:
+            return 0
+    except Exception as e:
+        print(f"Error getting image count for user {user_id}: {e}")
+        # Fallback: try to get all and count
+        try:
+            result = supabase.table("images").select("id").eq("user_id", user_id).execute()
+            count = len(result.data) if result.data else 0
+            print(f"Fallback count for user {user_id}: {count}")
+            return count
+        except Exception as e2:
+            print(f"Fallback also failed: {e2}")
+            return 0
 
 
 def get_images_with_3d_count(user_id: str) -> int:

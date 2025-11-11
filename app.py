@@ -128,15 +128,64 @@ async def health_check():
 @app.get("/health/user")
 async def health_check_user(user_id: str = Depends(get_user_id)):
     """User-specific health check endpoint (requires auth)"""
+    debug_info = {}
     try:
         total_images = db.get_image_count(user_id)
-    except Exception:
+        print(f"Health check for user {user_id}: {total_images} images")
+        
+        # Debug: Check what user_ids exist in database
+        if total_images == 0:
+            try:
+                # Get a sample of images to see what user_ids exist
+                import db as db_module
+                if db_module.supabase:
+                    # Get total count
+                    try:
+                        total_result = db_module.supabase.table("images").select("id").execute()
+                        total_count = len(total_result.data) if total_result.data else 0
+                        debug_info["total_images_in_db"] = total_count
+                    except Exception as count_err:
+                        print(f"Error counting total images: {count_err}")
+                        debug_info["total_images_in_db"] = "error"
+                    
+                    # Get sample user_ids
+                    try:
+                        sample_result = db_module.supabase.table("images").select("user_id").limit(20).execute()
+                        if sample_result.data:
+                            sample_user_ids = list(set([img.get("user_id") for img in sample_result.data if img.get("user_id")]))
+                            debug_info["sample_user_ids"] = sample_user_ids
+                            debug_info["current_user_id"] = user_id
+                            debug_info["user_id_match"] = user_id in sample_user_ids if sample_user_ids else False
+                            
+                            print(f"Debug: Total images in DB: {total_count}")
+                            print(f"Debug: Sample user_ids in database: {sample_user_ids}")
+                            print(f"Debug: Current user_id from JWT: {user_id}")
+                            print(f"Debug: User_id match: {user_id in sample_user_ids if sample_user_ids else 'N/A'}")
+                    except Exception as sample_err:
+                        print(f"Error getting sample user_ids: {sample_err}")
+                        debug_info["sample_error"] = str(sample_err)
+            except Exception as debug_e:
+                print(f"Debug query failed: {debug_e}")
+                debug_info["debug_error"] = str(debug_e)
+        
+    except Exception as e:
+        print(f"Error getting image count for user {user_id}: {e}")
+        import traceback
+        traceback.print_exc()
         total_images = 0
+        debug_info["error"] = str(e)
     
-    return {
+    response = {
         "status": "ok",
-        "total_images": total_images
+        "total_images": total_images,
+        "user_id": user_id  # Include user_id for debugging
     }
+    
+    # Include debug info in response for troubleshooting
+    if debug_info:
+        response["debug"] = debug_info
+    
+    return response
 
 
 @app.post("/embed/batch")
@@ -151,25 +200,62 @@ async def embed_batch(files: List[UploadFile] = File(...), user_id: str = Depend
     # Initialize variables before try block to avoid unbound variable errors
     new_embeddings = []
     new_image_ids = []
+    skipped_files = []
+    error_messages = []
     
     try:
         from sklearn.decomposition import PCA
         
         # Step 1: Upload images and generate embeddings
+        print(f"Processing {len(files)} files for user {user_id}")
         
-        for file in files:
-            # Validate file type
-            if not file.content_type or not file.content_type.startswith("image/"):
+        for idx, file in enumerate(files):
+            file_info = f"File {idx+1}: {file.filename} (type: {file.content_type})"
+            print(f"Processing {file_info}")
+            
+            # Validate file type - be more lenient
+            # Check content_type first, then fall back to filename extension
+            is_image = False
+            if file.content_type and file.content_type.startswith("image/"):
+                is_image = True
+            else:
+                # Fall back to checking filename extension
+                filename = file.filename or ""
+                file_ext_lower = Path(filename).suffix.lower()
+                image_extensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]
+                if file_ext_lower in image_extensions:
+                    is_image = True
+                    print(f"File {filename} accepted based on extension ({file_ext_lower})")
+            
+            if not is_image:
+                skip_reason = f"Invalid file type: {file.content_type or 'unknown'}"
+                print(f"Skipping {file_info}: {skip_reason}")
+                skipped_files.append(f"{file.filename}: {skip_reason}")
                 continue
             
             # Generate unique ID
             image_id = str(uuid.uuid4())
             
             # Get file extension
-            file_ext = Path(file.filename).suffix or ".jpg" # type: ignore
+            file_ext = Path(file.filename).suffix if file.filename else ".jpg"  # type: ignore
+            if not file_ext:
+                file_ext = ".jpg"
             
             # Read file content
-            content = await file.read()
+            try:
+                content = await file.read()
+                if len(content) == 0:
+                    skip_reason = "File is empty"
+                    print(f"Skipping {file_info}: {skip_reason}")
+                    skipped_files.append(f"{file.filename}: {skip_reason}")
+                    continue
+                print(f"Read {len(content)} bytes from {file.filename}")
+            except Exception as e:
+                skip_reason = f"Error reading file: {str(e)}"
+                print(f"Skipping {file_info}: {skip_reason}")
+                skipped_files.append(f"{file.filename}: {skip_reason}")
+                error_messages.append(skip_reason)
+                continue
             
             # Upload to Supabase Storage and get public URL
             try:
@@ -179,13 +265,25 @@ async def embed_batch(files: List[UploadFile] = File(...), user_id: str = Depend
                     file_ext=file_ext,
                     user_id=user_id
                 )
+                print(f"Uploaded {file.filename} to storage: {storage_url[:100]}...")
             except Exception as e:
+                skip_reason = f"Storage upload failed: {str(e)}"
                 print(f"Error uploading image {image_id} to storage: {e}")
+                skipped_files.append(f"{file.filename}: {skip_reason}")
+                error_messages.append(skip_reason)
                 continue
             
             # Generate CLIP embedding from image bytes
-            img = Image.open(BytesIO(content))
-            clip_emb = image_to_clip_vector(img)
+            try:
+                img = Image.open(BytesIO(content))
+                clip_emb = image_to_clip_vector(img)
+                print(f"Generated CLIP embedding for {file.filename}")
+            except Exception as e:
+                skip_reason = f"CLIP embedding failed: {str(e)}"
+                print(f"Error generating CLIP embedding for {file.filename}: {e}")
+                skipped_files.append(f"{file.filename}: {skip_reason}")
+                error_messages.append(skip_reason)
+                continue
             
             # Store in database with placeholder position (will update after PCA)
             try:
@@ -197,12 +295,25 @@ async def embed_batch(files: List[UploadFile] = File(...), user_id: str = Depend
                 )
                 new_embeddings.append(clip_emb)
                 new_image_ids.append(image_id)
+                print(f"Successfully stored {file.filename} in database")
             except Exception as e:
+                skip_reason = f"Database storage failed: {str(e)}"
                 print(f"Error storing image {image_id}: {e}")
+                skipped_files.append(f"{file.filename}: {skip_reason}")
+                error_messages.append(skip_reason)
                 continue
         
+        print(f"Successfully processed {len(new_image_ids)}/{len(files)} images")
+        if skipped_files:
+            print(f"Skipped files: {skipped_files}")
+        
         if not new_image_ids:
-            raise HTTPException(status_code=400, detail="No valid images uploaded")
+            error_detail = "No valid images uploaded. "
+            if skipped_files:
+                error_detail += f"Skipped: {', '.join(skipped_files[:3])}"
+            if error_messages:
+                error_detail += f" Errors: {', '.join(error_messages[:3])}"
+            raise HTTPException(status_code=400, detail=error_detail)
         
         # Step 2: Get ALL embeddings from database (including new ones) and fit/apply PCA
         images_data = db.get_all_embeddings(user_id)
@@ -589,8 +700,34 @@ async def export_data(user_id: str = Depends(get_user_id)):
     Returns images with 3D positions and metadata in format frontend expects.
     """
     try:
+        print(f"=== Export data request for user_id: {user_id} ===")
+        
         # Fetch all images for current user (including cluster info)
         images_data = db.get_all_images_for_export(user_id)
+        print(f"Export data for user {user_id}: found {len(images_data) if images_data else 0} images")
+        
+        # Debug: If no images, check what's in database
+        if not images_data or len(images_data) == 0:
+            print(f"No images found for user {user_id}")
+            # Additional debugging
+            try:
+                # Check total images in database
+                if db.supabase:
+                    total_check = db.supabase.table("images").select("id").execute()
+                    total_count = len(total_check.data) if total_check.data else 0
+                    print(f"Total images in database (all users): {total_count}")
+                    
+                    # Get sample user_ids
+                    sample = db.supabase.table("images").select("user_id").limit(20).execute()
+                    if sample.data:
+                        unique_user_ids = list(set([img.get("user_id") for img in sample.data if img.get("user_id")]))
+                        print(f"Unique user_ids in database (sample): {unique_user_ids}")
+                        print(f"Requested user_id: {user_id}")
+                        print(f"User_id in database: {user_id in unique_user_ids}")
+            except Exception as debug_err:
+                print(f"Debug query error: {debug_err}")
+                import traceback
+                traceback.print_exc()
         
         if not images_data:
             return {

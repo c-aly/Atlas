@@ -59,19 +59,37 @@ function App() {
         const health = await healthCheck()
         console.log('Backend status:', health)
         
-        // If user has at least 3 images, load them and go straight to map
-        if (health.total_images >= 3) {
-          // Check if clusters need to be recomputed (if all have cluster 0 or missing)
-          const data = await exportData()
+        // Log debug info if available
+        if (health.debug) {
+          console.log('Debug info from backend:', health.debug)
+        }
+        
+        // Always try to load data, regardless of count (count might be wrong)
+        let data
+        try {
+          data = await exportData()
+          console.log('Export data:', data)
+          console.log('Number of points:', data.coords?.points?.length || 0)
+        } catch (exportError) {
+          console.error('Error exporting data:', exportError)
+          // If export fails, show landing page
+          setShowLanding(true)
+          setIsInitialized(true)
+          return
+        }
+        
+        // If we have images, load them
+        if (data.coords && data.coords.points && data.coords.points.length > 0) {
+          console.log(`Loading ${data.coords.points.length} images from export data`)
           
           // Check if clustering is needed
-          const hasClusters = data.coords?.points?.some(point => {
+          const hasClusters = data.coords.points.some(point => {
             const cluster = data.meta?.[point.id]?.cluster
             return cluster !== undefined && cluster !== null && cluster !== 0
           })
           
-          // If no clusters found, try to recompute them
-          if (!hasClusters && data.coords?.points?.length > 1) {
+          // If no clusters found and we have enough images, try to recompute them
+          if (!hasClusters && data.coords.points.length > 1) {
             console.log('No clusters found, recomputing...')
             try {
               await recomputeClusters()
@@ -84,14 +102,21 @@ function App() {
                   thumb: newData.meta?.[point.id]?.thumb || null,
                   filename: newData.meta?.[point.id]?.filename || 'Unknown',
                   labels: newData.meta?.[point.id]?.labels || [],
-                  cluster: newData.meta?.[point.id]?.cluster || 0
+                  cluster: newData.meta?.[point.id]?.cluster || 0,
+                  description: newData.meta?.[point.id]?.description || null
                 }))
                 setImages(images)
                 
                 if (newData.graph && newData.graph.edges) {
                   setEdges(newData.graph.edges)
                 }
-                setShowLanding(false)
+                
+                // If we have at least 3 images, skip landing page
+                if (images.length >= 3) {
+                  setShowLanding(false)
+                } else {
+                  setShowLanding(true)
+                }
                 setIsInitialized(true)
                 return
               }
@@ -102,31 +127,34 @@ function App() {
           }
           
           // Transform data for frontend
-          if (data.coords && data.coords.points) {
-                const images = data.coords.points.map(point => ({
-                  id: point.id,
-                  coords: [point.x, point.y, point.z],
-                  thumb: data.meta?.[point.id]?.thumb || null,
-                  filename: data.meta?.[point.id]?.filename || 'Unknown',
-                  labels: data.meta?.[point.id]?.labels || [],
-                  cluster: data.meta?.[point.id]?.cluster || 0,
-                  description: data.meta?.[point.id]?.description || null
-                }))
-            setImages(images)
-            
-            // Skip landing page - go straight to map
-            setShowLanding(false)
-          }
+          const images = data.coords.points.map(point => ({
+            id: point.id,
+            coords: [point.x, point.y, point.z],
+            thumb: data.meta?.[point.id]?.thumb || null,
+            filename: data.meta?.[point.id]?.filename || 'Unknown',
+            labels: data.meta?.[point.id]?.labels || [],
+            cluster: data.meta?.[point.id]?.cluster || 0,
+            description: data.meta?.[point.id]?.description || null
+          }))
+          setImages(images)
           
           // Load graph edges
           if (data.graph && data.graph.edges) {
             console.log(`Loaded ${data.graph.edges.length} edges from export`)
             setEdges(data.graph.edges)
           } else {
-            console.warn('No graph edges in export data:', data)
+            console.warn('No graph edges in export data')
+          }
+          
+          // If we have at least 3 images, skip landing page
+          if (images.length >= 3) {
+            setShowLanding(false)
+          } else {
+            setShowLanding(true)
           }
         } else {
-          // User has less than 3 images, show landing page to upload more
+          // No images found, show landing page
+          console.log('No images found in export data')
           setShowLanding(true)
         }
         
