@@ -385,29 +385,61 @@ def get_all_images_for_export(user_id: str) -> List[Dict]:
 def get_image_count(user_id: str) -> int:
     """Get count of images for a user"""
     if not supabase:
+        print(f"get_image_count: Supabase client not configured")
         return 0
     
+    print(f"get_image_count: Querying for user_id='{user_id}' (type: {type(user_id).__name__}, length: {len(user_id)})")
+    
     try:
-        # Use count query without limit to get accurate count
+        # First, try to get a sample to see what user_ids actually exist
+        sample_result = supabase.table("images").select("user_id").limit(5).execute()
+        if sample_result.data:
+            sample_user_ids = [str(img.get("user_id", "")) for img in sample_result.data]
+            print(f"get_image_count: Sample user_ids in DB: {sample_user_ids}")
+            print(f"get_image_count: Requested user_id matches any sample: {user_id in sample_user_ids}")
+        
+        # Try count query
         result = supabase.table("images").select("id", count="exact").eq("user_id", user_id).execute()  # type: ignore
+        print(f"get_image_count: Count query result - hasattr count: {hasattr(result, 'count')}, count value: {getattr(result, 'count', None)}")
+        print(f"get_image_count: Count query result - hasattr data: {hasattr(result, 'data')}, data length: {len(result.data) if hasattr(result, 'data') and result.data else 0}")
+        
         # Supabase returns count in the count attribute
         if hasattr(result, 'count') and result.count is not None:
-            return int(result.count)
+            count = int(result.count)
+            print(f"get_image_count: Returning count from result.count: {count}")
+            return count
         # Fallback: count the actual data returned
         elif result.data:
-            return len(result.data)
+            count = len(result.data)
+            print(f"get_image_count: Returning count from result.data length: {count}")
+            return count
         else:
+            print(f"get_image_count: No count and no data, returning 0")
             return 0
     except Exception as e:
         print(f"Error getting image count for user {user_id}: {e}")
+        import traceback
+        traceback.print_exc()
         # Fallback: try to get all and count
         try:
-            result = supabase.table("images").select("id").eq("user_id", user_id).execute()
-            count = len(result.data) if result.data else 0
-            print(f"Fallback count for user {user_id}: {count}")
-            return count
+            print(f"get_image_count: Trying fallback query...")
+            result = supabase.table("images").select("id,user_id").execute()
+            print(f"get_image_count: Fallback query returned {len(result.data) if result.data else 0} total images")
+            
+            # Filter by user_id manually
+            if result.data:
+                matching = [img for img in result.data if str(img.get("user_id", "")) == str(user_id)]
+                count = len(matching)
+                print(f"get_image_count: Fallback found {count} images matching user_id '{user_id}'")
+                print(f"get_image_count: All user_ids in result: {[str(img.get('user_id', '')) for img in result.data[:10]]}")
+                return count
+            else:
+                print(f"get_image_count: Fallback query returned no data")
+                return 0
         except Exception as e2:
             print(f"Fallback also failed: {e2}")
+            import traceback
+            traceback.print_exc()
             return 0
 
 

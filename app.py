@@ -130,43 +130,47 @@ async def health_check_user(user_id: str = Depends(get_user_id)):
     """User-specific health check endpoint (requires auth)"""
     debug_info = {}
     try:
+        print(f"=== Health check called for user_id: {user_id} ===")
         total_images = db.get_image_count(user_id)
         print(f"Health check for user {user_id}: {total_images} images")
         
-        # Debug: Check what user_ids exist in database
-        if total_images == 0:
-            try:
-                # Get a sample of images to see what user_ids exist
-                import db as db_module
-                if db_module.supabase:
-                    # Get total count
-                    try:
-                        total_result = db_module.supabase.table("images").select("id").execute()
-                        total_count = len(total_result.data) if total_result.data else 0
-                        debug_info["total_images_in_db"] = total_count
-                    except Exception as count_err:
-                        print(f"Error counting total images: {count_err}")
-                        debug_info["total_images_in_db"] = "error"
-                    
-                    # Get sample user_ids
-                    try:
-                        sample_result = db_module.supabase.table("images").select("user_id").limit(20).execute()
-                        if sample_result.data:
-                            sample_user_ids = list(set([img.get("user_id") for img in sample_result.data if img.get("user_id")]))
-                            debug_info["sample_user_ids"] = sample_user_ids
-                            debug_info["current_user_id"] = user_id
-                            debug_info["user_id_match"] = user_id in sample_user_ids if sample_user_ids else False
-                            
-                            print(f"Debug: Total images in DB: {total_count}")
-                            print(f"Debug: Sample user_ids in database: {sample_user_ids}")
-                            print(f"Debug: Current user_id from JWT: {user_id}")
-                            print(f"Debug: User_id match: {user_id in sample_user_ids if sample_user_ids else 'N/A'}")
-                    except Exception as sample_err:
-                        print(f"Error getting sample user_ids: {sample_err}")
-                        debug_info["sample_error"] = str(sample_err)
-            except Exception as debug_e:
-                print(f"Debug query failed: {debug_e}")
-                debug_info["debug_error"] = str(debug_e)
+        # Always run debug checks to help diagnose issues
+        debug_info["requested_user_id"] = user_id
+        debug_info["total_images_found"] = total_images
+        
+        # Debug: Check what user_ids exist in database (always run, not just when count is 0)
+        try:
+            # Get a sample of images to see what user_ids exist
+            import db as db_module
+            if db_module.supabase:
+                # Get total count
+                try:
+                    total_result = db_module.supabase.table("images").select("id").execute()
+                    total_count = len(total_result.data) if total_result.data else 0
+                    debug_info["total_images_in_db"] = total_count
+                except Exception as count_err:
+                    print(f"Error counting total images: {count_err}")
+                    debug_info["total_images_in_db"] = "error"
+                
+                # Get sample user_ids
+                try:
+                    sample_result = db_module.supabase.table("images").select("user_id").limit(20).execute()
+                    if sample_result.data:
+                        sample_user_ids = list(set([str(img.get("user_id", "")) for img in sample_result.data if img.get("user_id")]))
+                        debug_info["sample_user_ids"] = sample_user_ids
+                        debug_info["current_user_id"] = user_id
+                        debug_info["user_id_match"] = str(user_id) in sample_user_ids if sample_user_ids else False
+                        
+                        print(f"Debug: Total images in DB: {total_count}")
+                        print(f"Debug: Sample user_ids in database: {sample_user_ids}")
+                        print(f"Debug: Current user_id from JWT: {user_id}")
+                        print(f"Debug: User_id match: {str(user_id) in sample_user_ids if sample_user_ids else 'N/A'}")
+                except Exception as sample_err:
+                    print(f"Error getting sample user_ids: {sample_err}")
+                    debug_info["sample_error"] = str(sample_err)
+        except Exception as debug_e:
+            print(f"Debug query failed: {debug_e}")
+            debug_info["debug_error"] = str(debug_e)
         
     except Exception as e:
         print(f"Error getting image count for user {user_id}: {e}")
